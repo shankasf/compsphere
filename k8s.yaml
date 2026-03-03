@@ -1,0 +1,228 @@
+# ── Backend Deployment ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compsphere-backend
+  namespace: compsphere
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compsphere-backend
+  template:
+    metadata:
+      labels:
+        app: compsphere-backend
+    spec:
+      containers:
+        - name: backend
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - "-c"
+            - |
+              apt-get update -qq && apt-get install -y -qq libpq-dev gcc curl docker.io gosu > /dev/null 2>&1
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
+              apt-get install -y -qq nodejs > /dev/null 2>&1
+              npm install -g @anthropic-ai/claude-code > /dev/null 2>&1
+              pip install -r requirements.txt -q 2>&1 | tail -3
+              useradd -m -s /bin/bash agent 2>/dev/null || true
+              usermod -aG docker agent 2>/dev/null || true
+              chmod 666 /var/run/docker.sock 2>/dev/null || true
+              chown -R agent:agent /data/browser-profiles 2>/dev/null || true
+              gosu agent python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+          workingDir: /app
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://postgres:postgres@72.62.162.83:5432/compsphere"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: compsphere-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: compsphere-secrets
+                  key: SECRET_KEY
+            - name: SANDBOX_IMAGE
+              value: "compshere-sandbox:latest"
+            - name: BROWSER_PROFILES_PATH
+              value: "/data/browser-profiles"
+            - name: MAX_CONCURRENT_SESSIONS
+              value: "2"
+            - name: DOCKER_HOST_IP
+              value: "72.62.162.83"
+          volumeMounts:
+            - name: backend-source
+              mountPath: /app
+            - name: browser-profiles
+              mountPath: /data/browser-profiles
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: backend-source
+          hostPath:
+            path: /home/ubuntu/apps/compsphere/backend
+            type: Directory
+        - name: browser-profiles
+          hostPath:
+            path: /data/browser-profiles
+            type: DirectoryOrCreate
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+---
+# ── Frontend Deployment ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compsphere-frontend
+  namespace: compsphere
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compsphere-frontend
+  template:
+    metadata:
+      labels:
+        app: compsphere-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: node:20-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - "-c"
+            - |
+              npm install --include=dev --ignore-scripts 2>&1 | tail -3
+              npm run dev
+          workingDir: /app
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: ""
+            - name: NEXT_PUBLIC_WS_URL
+              value: ""
+          volumeMounts:
+            - name: frontend-source
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: frontend-source
+          hostPath:
+            path: /home/ubuntu/apps/compsphere/frontend
+            type: Directory
+---
+# ── Backend Service ────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: compsphere-backend
+  namespace: compsphere
+spec:
+  selector:
+    app: compsphere-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+# ── Frontend Service ───────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: compsphere-frontend
+  namespace: compsphere
+spec:
+  selector:
+    app: compsphere-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+  type: ClusterIP
+---
+# ── Ingress (HTTPS) ───────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: compsphere-ingress
+  namespace: compsphere
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - compsphere.callsphere.tech
+      secretName: compsphere-tls
+  rules:
+    - host: compsphere.callsphere.tech
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: compsphere-backend
+                port:
+                  number: 8000
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: compsphere-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: compsphere-frontend
+                port:
+                  number: 3000
+---
+# ── Ingress (HTTP redirect) ───────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: compsphere-ingress-http
+  namespace: compsphere
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: compsphere.callsphere.tech
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: compsphere-frontend
+                port:
+                  number: 3000
