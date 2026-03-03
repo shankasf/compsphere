@@ -149,10 +149,17 @@ export function useAgentWebSocket(taskId: string): UseAgentWebSocketReturn {
     }
   }, [getWsUrl, taskId]);
 
+  // Use a ref to always call the latest `connect` without adding it as a
+  // dependency.  This prevents React StrictMode double-mount from tearing
+  // down a still-connecting WebSocket (the cause of the "closed before
+  // connection is established" console error).
+  const connectRef = useRef(connect);
+  connectRef.current = connect;
+
   useEffect(() => {
     if (!taskId) return;
     mountedRef.current = true;
-    connect();
+    connectRef.current();
 
     return () => {
       mountedRef.current = false;
@@ -163,7 +170,8 @@ export function useAgentWebSocket(taskId: string): UseAgentWebSocketReturn {
         wsRef.current.close();
       }
     };
-  }, [taskId, connect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
 
   const sendMessage = useCallback((content: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

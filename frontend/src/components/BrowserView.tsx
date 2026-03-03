@@ -35,18 +35,32 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
     }
   }, [controlEnabled]);
 
-  // ResizeObserver: re-apply scaleViewport when panel resizes to prevent blank canvas
+  // ResizeObserver: toggle scaleViewport off/on to force noVNC to
+  // recalculate canvas dimensions after the panel is resized.
+  // Simply re-setting to `true` is a no-op; toggling is required
+  // (noVNC #1938, react-vnc #44).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    let rafId: number;
     const observer = new ResizeObserver(() => {
       if (vncRef.current?.rfb) {
         // @ts-expect-error scaleViewport exists on noVNC RFB
-        vncRef.current.rfb.scaleViewport = true;
+        vncRef.current.rfb.scaleViewport = false;
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => {
+          if (vncRef.current?.rfb) {
+            // @ts-expect-error scaleViewport exists on noVNC RFB
+            vncRef.current.rfb.scaleViewport = true;
+          }
+        });
       }
     });
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(rafId);
+    };
   }, []);
 
   // Sync fullscreen state with browser API
@@ -68,12 +82,24 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
 
   const onConnect = useCallback(() => {
     setConnectionStatus("connected");
-    // Re-apply settings after connection establishes
-    if (vncRef.current?.rfb) {
-      // @ts-expect-error scaleViewport exists on noVNC RFB
-      vncRef.current.rfb.scaleViewport = true;
-      vncRef.current.rfb.viewOnly = !controlEnabled;
-    }
+    // Delay settings application: the noVNC canvas needs a frame to
+    // acquire container dimensions before scaleViewport can calculate
+    // the correct size.  Toggle off→on to force a fresh calculation.
+    setTimeout(() => {
+      if (vncRef.current?.rfb) {
+        vncRef.current.rfb.viewOnly = !controlEnabled;
+        // @ts-expect-error clipViewport exists on noVNC RFB
+        vncRef.current.rfb.clipViewport = false;
+        // @ts-expect-error scaleViewport exists on noVNC RFB
+        vncRef.current.rfb.scaleViewport = false;
+        requestAnimationFrame(() => {
+          if (vncRef.current?.rfb) {
+            // @ts-expect-error scaleViewport exists on noVNC RFB
+            vncRef.current.rfb.scaleViewport = true;
+          }
+        });
+      }
+    }, 150);
   }, [controlEnabled]);
 
   const onDisconnect = useCallback(() => {
@@ -193,14 +219,14 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
       </div>
 
       {/* VNC Screen */}
-      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden">
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden relative">
         <VncScreen
           ref={vncRef}
           url={getWsUrl()}
           scaleViewport
           viewOnly={!controlEnabled}
           focusOnClick
-          style={{ width: "100%", height: "100%" }}
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
           rfbOptions={{ wsProtocols: ["binary"] }}
           autoConnect
           retryDuration={3000}

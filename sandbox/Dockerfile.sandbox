@@ -8,10 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     fluxbox \
-    chromium-browser \
     python3 \
     python3-pip \
     curl \
+    wget \
     git \
     supervisor \
     net-tools \
@@ -34,13 +34,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Google Chrome (real binary, not snap stub) ────────────────────────────
+RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+    && rm /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Node.js 20 via NodeSource ────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ── websockify (Python package) ─────────────────────────────────────────────
-RUN pip3 install --no-cache-dir websockify
+RUN pip3 install --no-cache-dir websockify websockets
 
 # ── noVNC from GitHub ────────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /usr/share/novnc \
@@ -59,6 +66,8 @@ RUN mkdir -p /var/log/supervisor
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY entrypoint.sh /home/agent/entrypoint.sh
 RUN chmod +x /home/agent/entrypoint.sh
+COPY cdp_mcp_server.py /home/agent/cdp_mcp_server.py
+RUN chmod +x /home/agent/cdp_mcp_server.py
 
 WORKDIR /home/agent/workspace
 

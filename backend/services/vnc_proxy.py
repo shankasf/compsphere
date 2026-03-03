@@ -42,6 +42,7 @@ async def vnc_proxy(
                     f"attempts to {target_url}: {e}",
                     extra=log_extra,
                 )
+                await client_ws.close(code=1011, reason="VNC backend unreachable")
                 return
             logger.debug(
                 f"VNC proxy: attempt {attempt} refused, retrying in "
@@ -51,6 +52,7 @@ async def vnc_proxy(
             await asyncio.sleep(RETRY_DELAY_SECONDS)
 
     if server_ws is None:
+        await client_ws.close(code=1011, reason="VNC backend unreachable")
         return
 
     try:

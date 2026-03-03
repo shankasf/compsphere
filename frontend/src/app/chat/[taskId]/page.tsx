@@ -7,9 +7,16 @@ import {
   Group as PanelGroup,
   Separator as PanelResizeHandle,
 } from "react-resizable-panels";
+import dynamic from "next/dynamic";
 import { ChatPanel } from "@/components/ChatPanel";
-import { BrowserView } from "@/components/BrowserView";
 import { ChatTopBar } from "@/components/ChatTopBar";
+
+// BrowserView imports react-vnc which accesses `window` at module load —
+// skip SSR for the entire component so refs and sizing work correctly.
+const BrowserView = dynamic(
+  () => import("@/components/BrowserView").then((m) => m.BrowserView),
+  { ssr: false }
+);
 import { useAgentWebSocket } from "@/lib/ws";
 import { apiRequest, isAuthenticated } from "@/lib/api";
 import { XCircle, Loader2 } from "lucide-react";

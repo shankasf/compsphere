@@ -18,9 +18,29 @@ AGENT_SYSTEM_PROMPT = """You are CompSphere, an AI agent that can browse the web
 4. **Handle Errors Gracefully**: If something fails, try alternative approaches
 5. **Stay Focused**: Complete the user's task efficiently without unnecessary actions
 
-## Available Capabilities
-- **Browse the Web**: Navigate websites, click elements, fill forms, extract data
-- **Run Commands**: Execute terminal commands for file operations, installations, etc.
+## Browser Interaction Model
+You control the browser through an index-based system:
+1. **Snapshot first**: Call `browser_snapshot` (or `browser_navigate`) to see the page — you get a screenshot and a numbered list of interactive elements
+2. **Act by index**: Use the element index number to click, type, etc.
+3. **Observe**: Every action returns an updated snapshot so you can see what changed
+
+### Browser Tools
+- `browser_navigate(url)` — Go to a URL (auto-snapshots after load)
+- `browser_snapshot()` — Take a screenshot + get interactive element list
+- `browser_click(index)` — Click element by its index number
+- `browser_type(index, text)` — Type text into a field (clears existing content)
+- `browser_scroll(direction, amount)` — Scroll up/down/left/right
+- `browser_press_key(key)` — Press Enter, Tab, Escape, ArrowDown, etc.
+- `browser_wait(timeout)` — Wait for page to stabilize after dynamic loads
+
+### Tips
+- Always snapshot after navigation to see what's on the page
+- Use element names/roles from the snapshot to pick the right index
+- After clicking a link or button, the snapshot auto-updates — check the new elements
+- For search: type into the search box, then press Enter
+
+## Other Capabilities
+- **Run Commands**: Execute terminal commands via Bash for file operations, installations, etc.
 - **Read/Write Files**: Create and modify files in the workspace
 
 ## Safety Rules
@@ -46,7 +66,7 @@ class AgentOrchestrator:
         message_callback: Callable,
         anthropic_api_key: str,
     ):
-        """Run the Claude agent loop with Playwright MCP for browser control."""
+        """Run the Claude agent loop with CDP browser MCP for browser control."""
         log_extra = {"session_id": session_id, "container_id": container_id[:12]}
 
         logger.info(
@@ -63,20 +83,19 @@ class AgentOrchestrator:
             options = claude_sdk.ClaudeCodeOptions(
                 system_prompt=AGENT_SYSTEM_PROMPT,
                 allowed_tools=[
-                    "mcp__playwright__*",
+                    "mcp__cdp_browser__*",
                     "Bash",
                 ],
                 permission_mode="bypassPermissions",
                 mcp_servers={
-                    "playwright": {
+                    "cdp_browser": {
                         "command": "docker",
                         "args": [
                             "exec",
                             "-i",
                             container_id,
-                            "npx",
-                            "@playwright/mcp@latest",
-                            "--no-sandbox",
+                            "python3",
+                            "/home/agent/cdp_mcp_server.py",
                         ],
                     }
                 },

@@ -2,7 +2,7 @@
 
 CompSphere is a full-stack AI agent platform that executes tasks in sandboxed Docker containers with a real browser. Users can watch the agent navigate websites in real time through a live VNC stream, take control of the browser at any time, and chat with the agent — all from a single split-panel interface.
 
-Built with Claude Code SDK, Playwright MCP, and a VNC pipeline (Xvfb → x11vnc → websockify → react-vnc).
+Built with Claude Code SDK, a CDP-based browser automation MCP server (Manus AI approach), and a VNC pipeline (Xvfb → x11vnc → websockify → react-vnc).
 
 ![CompSphere](image.png)
 
@@ -34,10 +34,10 @@ Built with Claude Code SDK, Playwright MCP, and a VNC pipeline (Xvfb → x11vnc 
 
 ## Features
 
-- **AI Agent with Browser Control** — Claude Code SDK agent with Playwright MCP navigates real websites, fills forms, extracts data, and runs terminal commands inside a sandboxed container.
+- **AI Agent with Browser Control** — Claude Code SDK agent with a CDP-based MCP server navigates real websites using accessibility trees and screenshots (Manus AI approach), fills forms, extracts data, and runs terminal commands inside a sandboxed container.
 - **Live Browser View** — Real-time VNC stream of the agent's browser via react-vnc. Watch the agent work as it happens.
 - **Take Control Anytime** — Toggle between view-only and interactive mode. Click, type, and scroll in the live browser while the agent is idle.
-- **Persistent Browser Sessions** — Containers stay alive after the agent finishes. The browser and its state persist until you delete the task.
+- **Persistent Browser Sessions** — Chrome runs detached from the agent process and stays alive after task completion. Cookies, logins, and open tabs persist across sessions via per-user browser profiles. Containers are only destroyed when you delete the task.
 - **Split-Panel Interface** — Resizable chat + browser panels. Toggle browser visibility. Fullscreen mode.
 - **Real-Time Chat** — WebSocket-based message streaming. See agent thoughts, tool calls, tool results, and errors as they happen.
 - **Task Management** — Create, list, view, and delete tasks. Tasks are grouped by date (Today, Yesterday, Last 7 Days, Older).
@@ -69,7 +69,7 @@ Built with Claude Code SDK, Playwright MCP, and a VNC pipeline (Xvfb → x11vnc 
 │         │                │                      │             │
 │         │                │         ┌────────────┘             │
 │         │                │         │  docker exec -i          │
-│         │                │         │  npx @playwright/mcp     │
+│         │                │         │  python3 cdp_mcp_server  │
 └─────────┼────────────────┼─────────┼──────────────────────────┘
           │                │         │
           │                │         ▼
@@ -77,8 +77,8 @@ Built with Claude Code SDK, Playwright MCP, and a VNC pipeline (Xvfb → x11vnc 
           │    │     Sandbox Docker Container       │
           │    │                                    │
           │    │  ┌─────────┐    ┌──────────────┐  │
-          │    │  │  Xvfb   │───▶│  Chromium     │  │
-          │    │  │ :99     │    │  (Playwright) │  │
+          │    │  │  Xvfb   │───▶│Google Chrome  │  │
+          │    │  │ :99     │    │ (CDP :9222)   │  │
           │    │  └────┬────┘    └──────────────┘  │
           │    │       │                            │
           │    │  ┌────▼────┐    ┌──────────────┐  │
@@ -112,11 +112,11 @@ Built with Claude Code SDK, Playwright MCP, and a VNC pipeline (Xvfb → x11vnc 
 | **Migrations** | Alembic | Schema versioning |
 | **Auth** | python-jose (JWT), passlib (bcrypt) | Authentication |
 | **AI Agent** | Claude Code SDK | Agent loop & reasoning |
-| **Browser Control** | Playwright MCP | Browser automation |
+| **Browser Control** | CDP MCP Server (custom) | Browser automation via Chrome DevTools Protocol |
 | **Containers** | Docker SDK for Python | Sandbox management |
 | **VNC Server** | x11vnc, websockify | Screen capture & WebSocket bridge |
 | **Display** | Xvfb, Fluxbox | Virtual X11 display |
-| **Browser** | Chromium | Web browsing in sandbox |
+| **Browser** | Google Chrome | Web browsing in sandbox (persists across sessions) |
 | **Process Mgmt** | supervisord | Manage sandbox services |
 | **Orchestration** | Kubernetes (k3s) | Production deployment |
 | **Ingress** | Traefik + Let's Encrypt | HTTPS, routing |
@@ -180,7 +180,8 @@ compsphere/
 │   ├── package.json
 │   └── tailwind.config.ts
 ├── sandbox/
-│   ├── Dockerfile.sandbox         # Ubuntu 22.04 + Xvfb + VNC + Chromium
+│   ├── Dockerfile.sandbox         # Ubuntu 22.04 + Xvfb + VNC + Google Chrome
+│   ├── cdp_mcp_server.py          # CDP-based browser automation MCP server
 │   ├── supervisord.conf           # Process manager config
 │   └── entrypoint.sh              # Container entrypoint
 ├── k8s.yaml                       # Kubernetes manifests (production)
@@ -354,7 +355,7 @@ Streams agent messages in real time.
 **Server → Client messages:**
 ```json
 { "type": "assistant", "content": "I'll search for AI news..." }
-{ "type": "tool_use", "tool_name": "mcp__playwright__navigate", "tool_input": "{\"url\": \"...\"}" }
+{ "type": "tool_use", "tool_name": "mcp__cdp_browser__browser_navigate", "tool_input": "{\"url\": \"...\"}" }
 { "type": "tool_result", "content": "Page loaded successfully" }
 { "type": "status", "content": "Agent starting up..." }
 { "type": "error", "content": "Agent error: ..." }
@@ -418,13 +419,26 @@ Each task gets an isolated Ubuntu 22.04 Docker container with:
 - Bridge network with dynamic port mapping
 - Persistent browser profile mounted at `/home/agent/.browser-profile`
 - Runs as non-root `agent` user
-- Node.js 20 pre-installed for Playwright MCP
+- Google Chrome (not `chromium-browser` — the snap stub doesn't work in Docker)
+- Chrome persists after agent task completion (detached process group)
+- Per-user browser profile volume-mounted for cookie/login persistence
 
 **Agent control flow:**
-1. Backend calls `docker exec -i {container_id} npx @playwright/mcp@latest --no-sandbox`
-2. Claude Code SDK sends Playwright commands (navigate, click, type, screenshot)
-3. Playwright controls Chromium on the Xvfb display
-4. x11vnc captures the display and streams to the user via websockify
+1. Backend calls `docker exec -i {container_id} python3 /home/agent/cdp_mcp_server.py`
+2. CDP MCP server launches Chrome (or reconnects to existing instance) on DISPLAY=:99
+3. Claude Code SDK sends CDP browser commands (navigate, click, type, snapshot)
+4. MCP server uses accessibility tree + WebP screenshots for page perception
+5. Chrome renders on Xvfb, x11vnc captures the display and streams to the user via websockify
+6. When the agent finishes, MCP server exits but Chrome stays alive — the user can still see and interact with the browser via VNC
+
+**Browser tools (7 tools via CDP MCP):**
+- `browser_navigate(url)` — Navigate to a URL (auto-snapshots after load)
+- `browser_snapshot()` — Screenshot + indexed list of interactive elements
+- `browser_click(index)` — Click element by accessibility tree index
+- `browser_type(index, text)` — Type into a field (clears existing content)
+- `browser_scroll(direction, amount)` — Scroll page
+- `browser_press_key(key)` — Press keyboard key
+- `browser_wait(timeout)` — Wait for page stability (network idle + render settle)
 
 ---
 
@@ -500,7 +514,7 @@ User creates task
 POST /api/tasks ──► Container created ──► Agent starts
     │                    │                     │
     │                    │  VNC available       │  Claude Code SDK
-    │                    │  (after ~4s)         │  + Playwright MCP
+    │                    │  (after ~4s)         │  + CDP MCP Server
     │                    │                     │
     │                    ▼                     ▼
     │              Browser viewable      Agent running
@@ -508,6 +522,8 @@ POST /api/tasks ──► Container created ──► Agent starts
     │                    │                     │
     │                    │                     ▼
     │                    │              Agent finishes
+    │                    │              MCP server exits
+    │                    │              Chrome STAYS ALIVE
     │                    │                     │
     │                    │    ┌────────────────┘
     │                    │    │
@@ -515,6 +531,7 @@ POST /api/tasks ──► Container created ──► Agent starts
     │              Session = "idle"
     │              Container STAYS ALIVE
     │              Browser still viewable
+    │              (last page still open)
     │              User can take control
     │                    │
     │                    │  User deletes task
@@ -525,7 +542,7 @@ POST /api/tasks ──► Container created ──► Agent starts
   Done
 ```
 
-Containers persist after the agent finishes so users can continue viewing and interacting with the browser. They are only destroyed when the user explicitly deletes the task.
+Chrome runs in a detached process group (`start_new_session=True`) so it survives the MCP server exiting. On re-invocation (follow-up messages), the MCP server reconnects to the existing Chrome instance. The browser profile (cookies, logins, open tabs) persists via a per-user volume mount. Containers are only destroyed when the user explicitly deletes the task.
 
 ---
 
