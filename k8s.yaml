@@ -37,7 +37,7 @@ spec:
             - containerPort: 8000
           env:
             - name: DATABASE_URL
-              value: "postgresql+asyncpg://postgres:postgres@72.62.162.83:5432/compsphere"
+              value: "postgresql+asyncpg://postgres:postgres@YOUR_HOST_IP:5432/compsphere"
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -55,7 +55,7 @@ spec:
             - name: MAX_CONCURRENT_SESSIONS
               value: "2"
             - name: DOCKER_HOST_IP
-              value: "72.62.162.83"
+              value: "YOUR_HOST_IP"
           volumeMounts:
             - name: backend-source
               mountPath: /app
