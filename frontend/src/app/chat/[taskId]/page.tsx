@@ -25,7 +25,7 @@ import Link from "next/link";
 interface TaskDetails {
   id: string;
   prompt: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "idle" | "completed" | "failed";
   vnc_url: string | null;
   created_at: string;
 }

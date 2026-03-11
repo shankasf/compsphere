@@ -23,7 +23,7 @@ export async function apiRequest(path: string, options: RequestInit = {}) {
         component: 'api',
         endpoint: path,
         requestId,
-      } as any);
+      } as Record<string, unknown>);
       if (typeof window !== 'undefined') {
         localStorage.removeItem('token');
         window.location.href = '/auth/login';
@@ -40,7 +40,7 @@ export async function apiRequest(path: string, options: RequestInit = {}) {
         endpoint: path,
         statusCode: res.status,
         requestId,
-      } as any);
+      } as Record<string, unknown>);
 
       throw new Error(errorMsg);
     }
@@ -52,7 +52,7 @@ export async function apiRequest(path: string, options: RequestInit = {}) {
       logger.error('Network error: API unreachable', error, {
         component: 'api',
         endpoint: path,
-      } as any);
+      } as Record<string, unknown>);
     }
     throw error;
   }

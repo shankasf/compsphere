@@ -7,6 +7,7 @@ import {
   Play,
   CheckCircle2,
   XCircle,
+  MessageCircle,
 } from "lucide-react";
 
 interface ChatTopBarProps {
@@ -28,6 +29,11 @@ const STATUS_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: 
     icon: <Play className="w-3 h-3" />,
     color: "text-blue-400",
     bg: "bg-blue-500/8 border-blue-500/15",
+  },
+  idle: {
+    icon: <MessageCircle className="w-3 h-3" />,
+    color: "text-purple-400",
+    bg: "bg-purple-500/8 border-purple-500/15",
   },
   completed: {
     icon: <CheckCircle2 className="w-3 h-3" />,

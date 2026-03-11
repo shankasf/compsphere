@@ -32,6 +32,14 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
     setControlEnabled(next);
     if (vncRef.current?.rfb) {
       vncRef.current.rfb.viewOnly = !next;
+      // Auto-focus the VNC canvas so keyboard events reach it immediately
+      if (next) {
+        const canvas = containerRef.current?.querySelector("canvas");
+        if (canvas) {
+          canvas.setAttribute("tabindex", "-1");
+          canvas.focus();
+        }
+      }
     }
   }, [controlEnabled]);
 
@@ -45,12 +53,12 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
     let rafId: number;
     const observer = new ResizeObserver(() => {
       if (vncRef.current?.rfb) {
-        // @ts-expect-error scaleViewport exists on noVNC RFB
+
         vncRef.current.rfb.scaleViewport = false;
         cancelAnimationFrame(rafId);
         rafId = requestAnimationFrame(() => {
           if (vncRef.current?.rfb) {
-            // @ts-expect-error scaleViewport exists on noVNC RFB
+    
             vncRef.current.rfb.scaleViewport = true;
           }
         });
@@ -88,16 +96,19 @@ export function BrowserView({ vncUrl, taskStatus }: BrowserViewProps) {
     setTimeout(() => {
       if (vncRef.current?.rfb) {
         vncRef.current.rfb.viewOnly = !controlEnabled;
-        // @ts-expect-error clipViewport exists on noVNC RFB
         vncRef.current.rfb.clipViewport = false;
-        // @ts-expect-error scaleViewport exists on noVNC RFB
         vncRef.current.rfb.scaleViewport = false;
         requestAnimationFrame(() => {
           if (vncRef.current?.rfb) {
-            // @ts-expect-error scaleViewport exists on noVNC RFB
             vncRef.current.rfb.scaleViewport = true;
           }
         });
+      }
+      // Make the VNC canvas keyboard-focusable so typing works when
+      // the user clicks inside the browser view.
+      const canvas = containerRef.current?.querySelector("canvas");
+      if (canvas && !canvas.getAttribute("tabindex")) {
+        canvas.setAttribute("tabindex", "-1");
       }
     }, 150);
   }, [controlEnabled]);

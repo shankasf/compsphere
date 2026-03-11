@@ -94,4 +94,5 @@ async def vnc_proxy(
             extra=log_extra,
         )
     finally:
-        await server_ws.close()
+        if server_ws is not None:
+            await server_ws.close()

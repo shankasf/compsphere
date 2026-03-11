@@ -3,16 +3,19 @@ import json
 from typing import Callable, Optional
 
 import claude_code_sdk as claude_sdk
+from claude_code_sdk import ClaudeSDKClient
 from claude_code_sdk.types import AssistantMessage, ResultMessage, SystemMessage
 
 from core.logging_config import get_logger
 
 logger = get_logger("compsphere.agent")
 
+IDLE_TIMEOUT_SECONDS = 3600  # 1 hour
+
 AGENT_SYSTEM_PROMPT = """You are CompSphere, an AI agent that can browse the web, run terminal commands, and manage files to complete tasks for users.
 
 ## Core Principles
-1. **Plan First**: Before acting, briefly outline your approach
+1. **Act Proactively**: When the user asks you to do something, do it immediately — don't just list options
 2. **Execute Step by Step**: Take one action at a time, observe the result, then proceed
 3. **Be Transparent**: Explain what you're doing and why
 4. **Handle Errors Gracefully**: If something fails, try alternative approaches
@@ -38,6 +41,7 @@ You control the browser through an index-based system:
 - Use element names/roles from the snapshot to pick the right index
 - After clicking a link or button, the snapshot auto-updates — check the new elements
 - For search: type into the search box, then press Enter
+- When asked to fill in a form field, actually type into it — don't just describe what you see
 
 ## Other Capabilities
 - **Run Commands**: Execute terminal commands via Bash for file operations, installations, etc.
@@ -53,7 +57,7 @@ You control the browser through an index-based system:
 
 
 class AgentOrchestrator:
-    """Orchestrates the Claude agent loop with MCP tools for browser control."""
+    """Orchestrates the Claude agent as a persistent chatbot with MCP tools."""
 
     def __init__(self):
         pass
@@ -64,9 +68,11 @@ class AgentOrchestrator:
         session_id: str,
         container_id: str,
         message_callback: Callable,
+        status_callback: Callable,
+        follow_up_queue: asyncio.Queue,
         anthropic_api_key: str,
     ):
-        """Run the Claude agent loop with CDP browser MCP for browser control."""
+        """Run the Claude agent as a persistent loop that accepts follow-up messages."""
         log_extra = {"session_id": session_id, "container_id": container_id[:12]}
 
         logger.info(
@@ -74,57 +80,80 @@ class AgentOrchestrator:
             extra=log_extra,
         )
 
+        options = claude_sdk.ClaudeCodeOptions(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            allowed_tools=[
+                "mcp__cdp_browser__*",
+                "Bash",
+            ],
+            permission_mode="bypassPermissions",
+            mcp_servers={
+                "cdp_browser": {
+                    "command": "docker",
+                    "args": [
+                        "exec",
+                        "-i",
+                        container_id,
+                        "python3",
+                        "/home/agent/cdp_mcp_server.py",
+                    ],
+                }
+            },
+            max_turns=50,
+        )
+
+        client = ClaudeSDKClient(options=options)
+
         try:
             await message_callback({
                 "type": "status",
                 "content": "Agent starting up...",
             })
 
-            options = claude_sdk.ClaudeCodeOptions(
-                system_prompt=AGENT_SYSTEM_PROMPT,
-                allowed_tools=[
-                    "mcp__cdp_browser__*",
-                    "Bash",
-                ],
-                permission_mode="bypassPermissions",
-                mcp_servers={
-                    "cdp_browser": {
-                        "command": "docker",
-                        "args": [
-                            "exec",
-                            "-i",
-                            container_id,
-                            "python3",
-                            "/home/agent/cdp_mcp_server.py",
-                        ],
-                    }
-                },
-                max_turns=50,
-            )
+            # Connect (starts the CLI subprocess)
+            await client.connect()
 
-            turn_count = 0
-            async for message in claude_sdk.query(
-                prompt=task_prompt,
-                options=options,
-            ):
-                for parsed in self._parse_message(message):
-                    turn_count += 1
-                    if parsed["type"] == "tool_use":
-                        logger.debug(
-                            f"Agent tool call: {parsed.get('tool_name')}",
-                            extra=log_extra,
-                        )
-                    await message_callback(parsed)
+            # Send initial prompt and stream response
+            await client.query(task_prompt)
+            await self._stream_response(client, message_callback, log_extra)
 
-            logger.info(
-                f"Agent completed for session {session_id[:8]} ({turn_count} messages)",
-                extra=log_extra,
-            )
+            # Signal idle — ready for follow-ups
+            await status_callback("idle")
 
-            await message_callback({
-                "type": "status",
-                "content": "Task completed",
-            })
+            # Persistent loop: wait for follow-up messages
+            while True:
+                try:
+                    follow_up = await asyncio.wait_for(
+                        follow_up_queue.get(),
+                        timeout=IDLE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.info(
+                        f"Agent idle timeout for session {session_id[:8]}",
+                        extra=log_extra,
+                    )
+                    break
+
+                # None sentinel = shutdown
+                if follow_up is None:
+                    logger.info(
+                        f"Agent shutdown requested for session {session_id[:8]}",
+                        extra=log_extra,
+                    )
+                    break
+
+                logger.info(
+                    f"Agent processing follow-up for session {session_id[:8]}",
+                    extra=log_extra,
+                )
+                await status_callback("running")
+
+                # Send follow-up and stream response
+                await client.query(follow_up)
+                await self._stream_response(client, message_callback, log_extra)
+
+                # Back to idle
+                await status_callback("idle")
 
         except Exception as e:
             logger.error(
@@ -136,6 +165,34 @@ class AgentOrchestrator:
                 "type": "error",
                 "content": f"Agent error: {str(e)}",
             })
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            logger.info(
+                f"Agent disconnected for session {session_id[:8]}", extra=log_extra
+            )
+
+    async def _stream_response(
+        self,
+        client: ClaudeSDKClient,
+        message_callback: Callable,
+        log_extra: dict,
+    ):
+        """Stream all messages from the client until ResultMessage."""
+        turn_count = 0
+        async for message in client.receive_response():
+            for parsed in self._parse_message(message):
+                turn_count += 1
+                if parsed["type"] == "tool_use":
+                    logger.debug(
+                        f"Agent tool call: {parsed.get('tool_name')}",
+                        extra=log_extra,
+                    )
+                await message_callback(parsed)
+
+        logger.info(f"Turn completed ({turn_count} messages)", extra=log_extra)
 
     def _parse_message(self, message) -> list[dict]:
         """Parse a Claude SDK message into our standardised format.
@@ -172,7 +229,6 @@ class AgentOrchestrator:
                     # ToolResultBlock
                     content = getattr(block, "content", "")
                     if isinstance(content, list):
-                        # content can be a list of dicts with 'text' keys
                         parts = []
                         for item in content:
                             if isinstance(item, dict) and "text" in item:

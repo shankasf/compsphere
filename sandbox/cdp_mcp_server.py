@@ -428,24 +428,58 @@ class ActionExecutor:
         })
 
     async def type_text(self, elements: list[dict], index: int, text: str):
-        """Click element to focus, select all, then type text."""
-        # Focus the element first
+        """Click element to focus, clear existing text, then type using insertText."""
+        if index < 0 or index >= len(elements):
+            raise ValueError(f"Element index {index} out of range (0-{len(elements)-1})")
+
+        el = elements[index]
+
+        # Click to focus
         await self.click(elements, index)
+        await asyncio.sleep(0.15)
+
+        # Also explicitly focus via DOM to guarantee focus
+        try:
+            await self._cdp.send("DOM.focus", {"backendNodeId": el["backendNodeId"]})
+        except Exception:
+            pass  # Click-based focus is usually enough
         await asyncio.sleep(0.1)
 
-        # Select all existing text (Ctrl+A)
+        # Clear existing text: select all via JS then delete
+        try:
+            await self._cdp.send("Runtime.evaluate", {
+                "expression": """
+                    (function() {
+                        const el = document.activeElement;
+                        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+                            if (el.select) el.select();
+                            else {
+                                const sel = window.getSelection();
+                                sel.selectAllChildren(el);
+                            }
+                        }
+                    })()
+                """,
+            })
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
         await self._cdp.send("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": "a", "code": "KeyA",
-            "windowsVirtualKeyCode": 65, "modifiers": 2,  # Ctrl
+            "type": "keyDown", "key": "Backspace", "code": "Backspace",
+            "windowsVirtualKeyCode": 8,
         })
         await self._cdp.send("Input.dispatchKeyEvent", {
-            "type": "keyUp", "key": "a", "code": "KeyA",
-            "windowsVirtualKeyCode": 65, "modifiers": 2,
+            "type": "keyUp", "key": "Backspace", "code": "Backspace",
+            "windowsVirtualKeyCode": 8,
         })
         await asyncio.sleep(0.05)
 
-        # Insert text
-        await self._cdp.send("Input.insertText", {"text": text})
+        # Use Input.insertText per character — fires proper InputEvent
+        # which all modern frameworks (React, Google, etc.) handle correctly.
+        # keyDown/keyUp alone does NOT trigger InputEvent on many sites.
+        for char in text:
+            await self._cdp.send("Input.insertText", {"text": char})
+            await asyncio.sleep(0.02)
 
     async def scroll(self, direction: str, amount: int = 3):
         """Scroll the page. direction: up/down/left/right."""

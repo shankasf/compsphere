@@ -17,6 +17,7 @@ from models.session import AgentMessage, AgentSession
 from models.task import Task
 from models.user import User
 from routers.auth import get_current_user
+from services.agent_message_queue import agent_message_queue_registry
 from services.message_bus import message_bus
 
 router = APIRouter()
@@ -101,7 +102,9 @@ async def create_task(
         prompt=body.prompt,
     )
     db.add(task)
-    await db.flush()
+    # Commit immediately so the background task can see the row in a
+    # separate DB session (PostgreSQL read-committed isolation).
+    await db.commit()
     await db.refresh(task)
 
     task_id_str = str(task.id)
@@ -116,6 +119,7 @@ async def create_task(
     # Start agent session in background if services are available
     if session_manager and agent_orchestrator:
         async def _run_agent_background():
+            follow_up_queue = agent_message_queue_registry.create(task_id_str)
             try:
                 session_info = await session_manager.create_session(
                     task_id=task_id_str, user_id=user_id_str
@@ -124,11 +128,18 @@ async def create_task(
                 async def message_cb(msg):
                     await message_bus.publish(task_id_str, msg)
 
+                async def status_cb(new_status: str):
+                    await session_manager.update_agent_status(
+                        session_info["session_id"], new_status
+                    )
+
                 await agent_orchestrator.run_agent(
                     task_prompt=body.prompt,
                     session_id=session_info["session_id"],
                     container_id=session_info["container_id"],
                     message_callback=message_cb,
+                    status_callback=status_cb,
+                    follow_up_queue=follow_up_queue,
                     anthropic_api_key=settings.ANTHROPIC_API_KEY,
                 )
             except ValueError as e:
@@ -143,9 +154,8 @@ async def create_task(
                     extra=log_extra,
                 )
             finally:
-                # Mark agent as done but keep the container alive so the
-                # user can still view / interact with the browser.  The
-                # container is only torn down when the user deletes the task.
+                agent_message_queue_registry.remove(task_id_str)
+                # Mark agent as done but keep the container alive
                 if session_manager:
                     for sid, info in list(session_manager._active_sessions.items()):
                         if info.get("task_id") == task_id_str:
@@ -196,7 +206,7 @@ async def get_task(
     if session_manager:
         task_id_str = str(task_id)
         for sid, info in session_manager._active_sessions.items():
-            if info.get("task_id") == task_id_str and info.get("status") in ("running", "idle"):
+            if info.get("task_id") == task_id_str and info.get("status") in ("running", "idle", "completed"):
                 vnc_url = f"/ws/vnc/{sid}"
                 break
 
@@ -221,8 +231,12 @@ async def delete_task(
             detail="Task not found",
         )
 
-    # Tear down any still-alive containers for this task
+    # Signal agent to shut down gracefully, then tear down containers
     task_id_str = str(task_id)
+    queue = agent_message_queue_registry.get(task_id_str)
+    if queue:
+        await queue.put(None)  # Sentinel for shutdown
+
     if session_manager:
         for sid, info in list(session_manager._active_sessions.items()):
             if info.get("task_id") == task_id_str:
@@ -253,14 +267,14 @@ async def send_message(
             detail="Task not found",
         )
 
-    if task.status not in ("running", "pending"):
+    if task.status not in ("running", "pending", "idle"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot send message to task with status '{task.status}'",
         )
 
     active_session = next(
-        (s for s in task.sessions if s.status in ("running", "creating")),
+        (s for s in task.sessions if s.status in ("running", "creating", "idle")),
         None,
     )
     if active_session is None:
@@ -287,9 +301,16 @@ async def send_message(
     await db.flush()
     await db.refresh(message)
 
+    # Deliver to the running agent's follow-up queue so it actually
+    # processes the message (not just persisted in DB).
+    task_id_str = str(task_id)
+    agent_queue = agent_message_queue_registry.get(task_id_str)
+    if agent_queue is not None:
+        await agent_queue.put(body.content)
+
     logger.info(
-        f"Message sent to task {str(task_id)[:8]} (seq={last_seq + 1})",
-        extra={"task_id": str(task_id), "session_id": str(active_session.id)},
+        f"Message sent to task {task_id_str[:8]} (seq={last_seq + 1})",
+        extra={"task_id": task_id_str, "session_id": str(active_session.id)},
     )
 
     return message

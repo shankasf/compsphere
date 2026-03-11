@@ -6,6 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from config import settings
 from core.logging_config import get_logger
+from services.agent_message_queue import agent_message_queue_registry
 from services.message_bus import message_bus
 from services.vnc_proxy import vnc_proxy
 
@@ -26,13 +27,13 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
 
     logger.info(f"Agent WebSocket connected for task {task_id[:8]}", extra=log_extra)
 
-    queue = message_bus.subscribe(task_id)
+    bus_queue = message_bus.subscribe(task_id)
 
     async def _send_from_queue():
         """Forward messages from the bus to this WebSocket client."""
         try:
             while True:
-                msg = await queue.get()
+                msg = await bus_queue.get()
                 await websocket.send_json(msg)
         except Exception:
             pass  # WebSocket closed or cancelled
@@ -51,12 +52,29 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
                 )
                 continue
 
-            if message.get("type") == "user_message":
+            if message.get("type") in ("user", "user_message"):
+                content = message.get("content", "").strip()
+                if not content:
+                    continue
+
                 logger.debug(
-                    f"Received user message for task {task_id[:8]}: "
-                    f"{message.get('content', '')[:80]}",
+                    f"Received user message for task {task_id[:8]}: {content[:80]}",
                     extra=log_extra,
                 )
+
+                # Forward to agent's follow-up queue
+                agent_queue = agent_message_queue_registry.get(task_id)
+                if agent_queue is not None:
+                    await agent_queue.put(content)
+                else:
+                    logger.warning(
+                        f"No agent queue for task {task_id[:8]}, message dropped",
+                        extra=log_extra,
+                    )
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": "Agent is not currently accepting messages for this task.",
+                    })
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from task {task_id[:8]}", extra=log_extra)
     except Exception as e:
@@ -67,7 +85,7 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
         )
     finally:
         sender_task.cancel()
-        message_bus.unsubscribe(task_id, queue)
+        message_bus.unsubscribe(task_id, bus_queue)
 
 
 @router.websocket("/ws/vnc/{session_id}")

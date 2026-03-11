@@ -129,6 +129,7 @@ export function useAgentWebSocket(taskId: string): UseAgentWebSocketReturn {
             taskId,
           });
           reconnectTimeoutRef.current = setTimeout(() => {
+            if (!mountedRef.current) return;
             reconnectAttemptsRef.current++;
             connect();
           }, delay);
@@ -167,7 +168,17 @@ export function useAgentWebSocket(taskId: string): UseAgentWebSocketReturn {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        const ws = wsRef.current;
+        wsRef.current = null;
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        } else if (ws.readyState === WebSocket.CONNECTING) {
+          // Avoid "closed before connection established" warning in
+          // React StrictMode — wait for it to open, then close.
+          ws.onopen = () => ws.close();
+          ws.onerror = () => {};
+          ws.onmessage = () => {};
+        }
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
