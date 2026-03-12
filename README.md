@@ -36,24 +36,103 @@ AI agent platform that executes tasks in sandboxed Docker containers with a real
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph Client["User Browser"]
+        UI["Next.js Frontend<br/>(React + Tailwind)"]
+        VNCClient["react-vnc<br/>(noVNC Viewer)"]
+    end
+
+    subgraph Backend["FastAPI Backend"]
+        API["REST API<br/>(Auth, Tasks, Logs)"]
+        WSAgent["WebSocket<br/>/ws/agent/{task_id}"]
+        WSVnc["WebSocket<br/>/ws/vnc/{session_id}"]
+        MsgBus["Message Bus<br/>(in-memory pub/sub)"]
+        Orchestrator["Agent Orchestrator<br/>(Claude Code SDK)"]
+        VNCProxy["VNC Proxy<br/>(frame relay)"]
+        DockerMgr["Docker Manager<br/>(container lifecycle)"]
+        SessionMgr["Session Manager"]
+        Logging["Logging<br/>(JSON + rotating files)"]
+    end
+
+    subgraph Sandbox["Sandbox Docker Container"]
+        Xvfb["Xvfb :99<br/>(virtual display)"]
+        Chrome["Google Chrome<br/>(CDP :9222)"]
+        CDP["CDP MCP Server<br/>(browser automation)"]
+        VNC["x11vnc :5900"]
+        NoVNC["websockify :6080"]
+        Supervisor["supervisord"]
+    end
+
+    DB[("PostgreSQL<br/>users · tasks<br/>sessions · messages")]
+
+    %% Client → Backend
+    UI -- "REST (JWT)" --> API
+    UI -- "wss:// chat" --> WSAgent
+    VNCClient -- "wss:// binary" --> WSVnc
+
+    %% Backend internal
+    API --> SessionMgr
+    API --> DockerMgr
+    WSAgent <--> MsgBus
+    MsgBus <--> Orchestrator
+    WSVnc <--> VNCProxy
+    Orchestrator --> Logging
+    API --> Logging
+
+    %% Backend → Sandbox
+    Orchestrator -- "docker exec<br/>stdio MCP" --> CDP
+    DockerMgr -- "create / destroy" --> Sandbox
+    VNCProxy -- "TCP :6080" --> NoVNC
+
+    %% Sandbox internal
+    Supervisor -. manages .-> Xvfb & VNC & NoVNC
+    Xvfb --> Chrome
+    CDP -- "ws://localhost:9222" --> Chrome
+    VNC -- "screen capture" --> Xvfb
+    VNC --> NoVNC
+
+    %% Backend → DB
+    API --> DB
+    SessionMgr --> DB
+    Orchestrator --> DB
 ```
-User Browser
-  |
-  |-- wss://.../ws/agent/{task_id}    (chat messages)
-  |-- wss://.../ws/vnc/{session_id}   (VNC binary frames)
-  v
-FastAPI Backend
-  |-- Message Bus (in-memory pub/sub)
-  |-- VNC Proxy (WebSocket relay)
-  |-- Agent Orchestrator (Claude Code SDK)
-  |       |
-  |       |-- docker exec -i <container> python3 cdp_mcp_server.py
-  |       v
-  |   Sandbox Docker Container
-  |     |-- Xvfb (:99)  -->  Google Chrome (CDP :9222)
-  |     |-- x11vnc (:5900)  -->  websockify (:6080)
-  v
-PostgreSQL (users, tasks, sessions, messages)
+
+### Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as Frontend
+    participant API as FastAPI
+    participant Orch as Agent Orchestrator
+    participant Docker as Docker Manager
+    participant Sandbox as Sandbox Container
+    participant Chrome as Chrome (CDP)
+
+    User->>FE: Create task (prompt)
+    FE->>API: POST /api/tasks
+    API->>Docker: Create sandbox container
+    Docker-->>API: container_id, vnc_port
+    API->>Orch: Start agent loop
+    API-->>FE: task_id, session_id
+
+    FE->>API: Connect wss://ws/agent/{task_id}
+    FE->>API: Connect wss://ws/vnc/{session_id}
+
+    loop Agent Execution
+        Orch->>Sandbox: docker exec cdp_mcp_server.py
+        Sandbox->>Chrome: CDP command (navigate, click, type)
+        Chrome-->>Sandbox: Result + screenshot
+        Sandbox-->>Orch: MCP tool result
+        Orch-->>FE: Stream thoughts & actions (WebSocket)
+        Note over FE: User watches live via VNC
+    end
+
+    User->>FE: Send follow-up message
+    FE->>API: POST /api/tasks/{id}/message
+    API->>Orch: Enqueue message
+    Orch->>Sandbox: Continue execution
 ```
 
 ## Project Structure
