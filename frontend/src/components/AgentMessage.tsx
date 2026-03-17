@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ChevronDown,
   ChevronRight,
@@ -74,10 +76,10 @@ export function AgentMessage({ message }: AgentMessageProps) {
                 </span>
               </div>
               <div className="max-w-[90%] group relative">
-                <div className="px-4 py-2.5 rounded-2xl rounded-tl-md bg-[#1a1a28] border border-[#252535] text-gray-200">
-                  <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
+                <div className="px-4 py-2.5 rounded-2xl rounded-tl-md bg-[#1a1a28] border border-[#252535] text-gray-200 agent-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {message.content}
-                  </p>
+                  </ReactMarkdown>
                 </div>
                 <button
                   onClick={() => handleCopy(message.content)}

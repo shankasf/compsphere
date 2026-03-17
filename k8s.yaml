@@ -56,6 +56,16 @@ spec:
               value: "2"
             - name: DOCKER_HOST_IP
               value: "72.62.162.83"
+            - name: LINKEDIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: compsphere-secrets
+                  key: LINKEDIN_EMAIL
+            - name: LINKEDIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: compsphere-secrets
+                  key: LINKEDIN_PASSWORD
           volumeMounts:
             - name: backend-source
               mountPath: /app

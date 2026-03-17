@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from typing import Callable, Optional
 
 import claude_code_sdk as claude_sdk
@@ -47,6 +48,21 @@ You control the browser through an index-based system:
 - **Run Commands**: Execute terminal commands via Bash for file operations, installations, etc.
 - **Read/Write Files**: Create and modify files in the workspace
 
+## Saved Credentials
+When a task involves logging in to a service and you detect a login page, use the
+credentials below automatically — do NOT ask the user for them.
+
+{credentials_block}
+
+## Output Formatting
+- Use clean, well-structured Markdown in your responses
+- Use **bold** for key terms, labels, and important details
+- Use blockquotes (>) for standout information like confirmations or summaries
+- Use bullet lists for multiple items; keep them concise
+- Use headings sparingly — only for distinct sections in longer responses
+- Keep responses short and scannable — avoid walls of text
+- Do NOT use emojis excessively; one or two per message at most
+
 ## Safety Rules
 - Never access sensitive system files or modify system configurations
 - Never attempt to escape the sandbox environment
@@ -54,6 +70,17 @@ You control the browser through an index-based system:
 - Always respect website terms of service
 - If a task seems harmful or unethical, explain why and decline
 """
+
+
+def _build_credentials_block() -> str:
+    """Build a credentials section from environment variables."""
+    creds = []
+    # LinkedIn
+    li_email = os.environ.get("LINKEDIN_EMAIL")
+    li_password = os.environ.get("LINKEDIN_PASSWORD")
+    if li_email and li_password:
+        creds.append(f"- **LinkedIn**: email=`{li_email}` password=`{li_password}`")
+    return "\n".join(creds) if creds else "No saved credentials configured."
 
 
 class AgentOrchestrator:
@@ -80,8 +107,12 @@ class AgentOrchestrator:
             extra=log_extra,
         )
 
+        system_prompt = AGENT_SYSTEM_PROMPT.format(
+            credentials_block=_build_credentials_block()
+        )
+
         options = claude_sdk.ClaudeCodeOptions(
-            system_prompt=AGENT_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             allowed_tools=[
                 "mcp__cdp_browser__*",
                 "Bash",

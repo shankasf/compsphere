@@ -12,6 +12,7 @@ All logging goes to stderr; stdout is reserved for MCP messages.
 import asyncio
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -131,6 +132,18 @@ class BrowserManager:
         if ws_url:
             log("Reusing existing Chrome instance")
         else:
+            # Remove stale lock files left by a previous container's Chrome.
+            # When the browser profile is a shared volume, the SingletonLock
+            # symlink may point to an old container hostname, causing Chrome
+            # to refuse to start.
+            profile = "/home/agent/.browser-profile"
+            for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                lock_path = os.path.join(profile, lock)
+                try:
+                    os.remove(lock_path)
+                except FileNotFoundError:
+                    pass
+
             log("Launching Chrome …")
             subprocess.Popen(
                 [
@@ -139,6 +152,7 @@ class BrowserManager:
                     "--remote-debugging-port=9222",
                     "--display=:99",
                     "--window-size=1280,720",
+                    "--start-maximized",
                     "--user-data-dir=/home/agent/.browser-profile",
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
