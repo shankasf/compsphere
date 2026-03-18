@@ -35,6 +35,7 @@ agent_orchestrator = None
 class TaskCreate(BaseModel):
     name: Optional[str] = None
     prompt: str
+    model: Optional[str] = None
 
 
 class MessageCreate(BaseModel):
@@ -141,6 +142,9 @@ async def create_task(
                     status_callback=status_cb,
                     follow_up_queue=follow_up_queue,
                     anthropic_api_key=settings.ANTHROPIC_API_KEY,
+                    task_id=task_id_str,
+                    user_id=user_id_str,
+                    model=body.model,
                 )
             except ValueError as e:
                 logger.warning(
@@ -231,21 +235,38 @@ async def delete_task(
             detail="Task not found",
         )
 
-    # Signal agent to shut down gracefully, then tear down containers
     task_id_str = str(task_id)
+    log_extra = {"task_id": task_id_str}
+
+    # 1. Signal the agent to shut down gracefully
     queue = agent_message_queue_registry.get(task_id_str)
     if queue:
         await queue.put(None)  # Sentinel for shutdown
+        # Brief wait so the agent can pick up the sentinel and disconnect cleanly
+        await asyncio.sleep(0.5)
 
+    # 2. Force-remove the message queue so nothing else can write to it
+    agent_message_queue_registry.remove(task_id_str)
+
+    # 3. Destroy all sandbox containers for this task
     if session_manager:
         for sid, info in list(session_manager._active_sessions.items()):
             if info.get("task_id") == task_id_str:
-                await session_manager.destroy_session(sid)
+                try:
+                    await session_manager.destroy_session(sid)
+                    logger.info(f"Session {sid[:8]} destroyed on task delete", extra=log_extra)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to destroy session {sid[:8]} during task delete: {e}",
+                        exc_info=True,
+                        extra=log_extra,
+                    )
 
+    # 4. Delete the task (cascades to agent_sessions and agent_messages)
     await db.delete(task)
     await db.flush()
 
-    logger.info(f"Task {str(task_id)[:8]} deleted by user {str(current_user.id)[:8]}", extra={"task_id": str(task_id)})
+    logger.info(f"Task {task_id_str[:8]} deleted by user {str(current_user.id)[:8]}", extra=log_extra)
 
 
 @router.post("/{task_id}/message", response_model=AgentMessageResponse)

@@ -554,6 +554,43 @@ Messages can arrive twice due to WebSocket reconnections or React StrictMode. Co
 1. **Frontend:** Content-based dedup with a 2-second sliding window
 2. **Backend:** Skips duplicate `ResultMessage` events from Claude SDK
 
+### Prompt Caching Strategy
+
+CompSphere minimizes token costs using Anthropic's prompt caching. The system prompt is structured so the static prefix gets cached and reused across turns at 90% discount.
+
+```mermaid
+flowchart LR
+    subgraph SystemPrompt["System Prompt (structured for caching)"]
+        direction TB
+        Static["Static Instructions\n(core rules, browser tools,\nsafety, formatting)\n~1500 tokens"]
+        FileRef["Profile File Reference\n'cat /home/agent/user_profile.txt'\n(loaded on demand)"]
+        Dynamic["Dynamic Credentials\n(changes per env)\nKept LAST"]
+    end
+
+    subgraph Turn1["Turn 1"]
+        CW["Cache WRITE\n$3.75/MTok"]
+    end
+
+    subgraph TurnN["Turns 2–50"]
+        CR["Cache READ\n$0.30/MTok\n(90% cheaper)"]
+    end
+
+    Static --> CW
+    CW --> CR
+
+    style Static fill:#10b981,color:#fff
+    style FileRef fill:#3b82f6,color:#fff
+    style Dynamic fill:#f59e0b,color:#fff
+    style CR fill:#10b981,color:#fff
+```
+
+**Key optimizations:**
+- **Slim prompt** — user profile (~3000 tokens) moved to file, read only when forms are encountered
+- **Static prefix first** — maximizes cache hit on every turn
+- **Dynamic content last** — credentials at the end don't invalidate the cached prefix
+- **Model routing** — optional `model` param to route simple tasks to Haiku (75% cheaper)
+- **Cache analytics** — admin dashboard tracks hit rate, savings, and per-request cache breakdown
+
 ### Container Lifecycle
 
 ```mermaid

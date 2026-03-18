@@ -8,6 +8,7 @@ from claude_code_sdk import ClaudeSDKClient
 from claude_code_sdk.types import AssistantMessage, ResultMessage, SystemMessage
 
 from core.logging_config import get_logger
+from services.cost_tracker import cost_tracker
 
 logger = get_logger("compsphere.agent")
 
@@ -48,12 +49,6 @@ You control the browser through an index-based system:
 - **Run Commands**: Execute terminal commands via Bash for file operations, installations, etc.
 - **Read/Write Files**: Create and modify files in the workspace
 
-## Saved Credentials
-When a task involves logging in to a service and you detect a login page, use the
-credentials below automatically — do NOT ask the user for them.
-
-{credentials_block}
-
 ## Output Formatting
 - Use clean, well-structured Markdown in your responses
 - Use **bold** for key terms, labels, and important details
@@ -62,6 +57,28 @@ credentials below automatically — do NOT ask the user for them.
 - Use headings sparingly — only for distinct sections in longer responses
 - Keep responses short and scannable — avoid walls of text
 - Do NOT use emojis excessively; one or two per message at most
+- Keep responses brief — use short sentences and avoid repeating information the user already knows.
+
+## Auto-Fill Forms
+When you encounter ANY online form, read the user's profile first:
+```bash
+cat /home/agent/user_profile.txt
+```
+Use ALL details from that file to fill matching form fields immediately.
+
+### Resume Selection & Upload Rules
+- **California-based jobs**: Upload `/home/agent/San_jose_Sagar_Shankaran.pdf`. Use San Jose address: 856 S Third Street, San Jose, CA 95112.
+- **All other jobs**: Upload a different/general resume. Use the address from the profile file.
+- On LinkedIn Easy Apply for CA jobs: Select `San_jose_Sagar_Shankaran.pdf` from the picker.
+- On external portals: Always upload the correct resume based on location.
+
+### Rules
+1. Fill ALL form fields using the profile file data — do NOT ask the user for info that's in the file
+2. For dropdowns, pick the option that best matches
+3. If info is not in the file, ask the user
+4. Review the form before submitting
+5. For "years of experience" fields, use 5
+6. For "highest education" fields, use Master's degree
 
 ## Safety Rules
 - Never access sensitive system files or modify system configurations
@@ -69,6 +86,12 @@ credentials below automatically — do NOT ask the user for them.
 - Never store or transmit user credentials (except in the browser profile)
 - Always respect website terms of service
 - If a task seems harmful or unethical, explain why and decline
+
+## Saved Credentials
+When a task involves logging in to a service and you detect a login page, use the
+credentials below automatically — do NOT ask the user for them.
+
+{credentials_block}
 """
 
 
@@ -98,6 +121,9 @@ class AgentOrchestrator:
         status_callback: Callable,
         follow_up_queue: asyncio.Queue,
         anthropic_api_key: str,
+        task_id: str = "",
+        user_id: str = "",
+        model: Optional[str] = None,
     ):
         """Run the Claude agent as a persistent loop that accepts follow-up messages."""
         log_extra = {"session_id": session_id, "container_id": container_id[:12]}
@@ -111,7 +137,7 @@ class AgentOrchestrator:
             credentials_block=_build_credentials_block()
         )
 
-        options = claude_sdk.ClaudeCodeOptions(
+        sdk_kwargs = dict(
             system_prompt=system_prompt,
             allowed_tools=[
                 "mcp__cdp_browser__*",
@@ -132,6 +158,10 @@ class AgentOrchestrator:
             },
             max_turns=50,
         )
+        if model:
+            sdk_kwargs["model"] = model
+
+        options = claude_sdk.ClaudeCodeOptions(**sdk_kwargs)
 
         client = ClaudeSDKClient(options=options)
 
@@ -146,7 +176,9 @@ class AgentOrchestrator:
 
             # Send initial prompt and stream response
             await client.query(task_prompt)
-            await self._stream_response(client, message_callback, log_extra)
+            cost_data = await self._stream_response(client, message_callback, log_extra)
+            if cost_data:
+                await self._record_cost(cost_data, session_id, task_id, user_id)
 
             # Signal idle — ready for follow-ups
             await status_callback("idle")
@@ -181,7 +213,9 @@ class AgentOrchestrator:
 
                 # Send follow-up and stream response
                 await client.query(follow_up)
-                await self._stream_response(client, message_callback, log_extra)
+                cost_data = await self._stream_response(client, message_callback, log_extra)
+                if cost_data:
+                    await self._record_cost(cost_data, session_id, task_id, user_id)
 
                 # Back to idle
                 await status_callback("idle")
@@ -210,10 +244,36 @@ class AgentOrchestrator:
         client: ClaudeSDKClient,
         message_callback: Callable,
         log_extra: dict,
-    ):
-        """Stream all messages from the client until ResultMessage."""
+    ) -> Optional[dict]:
+        """Stream all messages from the client until ResultMessage.
+
+        Returns cost/usage data extracted from the ResultMessage, or None.
+        """
         turn_count = 0
+        cost_data = None
+
         async for message in client.receive_response():
+            if isinstance(message, ResultMessage):
+                # Extract cost and usage data
+                usage = getattr(message, "usage", None) or {}
+                cost_data = {
+                    "total_cost_usd": getattr(message, "total_cost_usd", None) or 0.0,
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "duration_ms": getattr(message, "duration_ms", 0) or 0,
+                    "duration_api_ms": getattr(message, "duration_api_ms", 0) or 0,
+                    "num_turns": getattr(message, "num_turns", 0) or 0,
+                }
+                logger.info(
+                    f"Agent result: cost=${cost_data['total_cost_usd']:.4f} "
+                    f"tokens={cost_data['input_tokens']}in/{cost_data['output_tokens']}out "
+                    f"turns={cost_data['num_turns']}",
+                    extra=log_extra,
+                )
+                continue
+
             for parsed in self._parse_message(message):
                 turn_count += 1
                 if parsed["type"] == "tool_use":
@@ -224,6 +284,53 @@ class AgentOrchestrator:
                 await message_callback(parsed)
 
         logger.info(f"Turn completed ({turn_count} messages)", extra=log_extra)
+        return cost_data
+
+    async def _record_cost(
+        self, cost_data: dict, session_id: str, task_id: str, user_id: str
+    ):
+        """Persist usage to DB and broadcast to admin dashboard."""
+        from models.database import async_session_factory
+        from models.usage import UsageLog
+
+        # Save to database
+        try:
+            async with async_session_factory() as db:
+                log_entry = UsageLog(
+                    task_id=task_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    model="claude-code-sdk",
+                    input_tokens=cost_data.get("input_tokens", 0),
+                    output_tokens=cost_data.get("output_tokens", 0),
+                    cache_read_tokens=cost_data.get("cache_read_tokens", 0),
+                    cache_creation_tokens=cost_data.get("cache_creation_tokens", 0),
+                    total_cost_usd=cost_data.get("total_cost_usd", 0.0),
+                    duration_ms=cost_data.get("duration_ms", 0),
+                    duration_api_ms=cost_data.get("duration_api_ms", 0),
+                    num_turns=cost_data.get("num_turns", 0),
+                )
+                db.add(log_entry)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to save usage log: {e}", exc_info=True)
+
+        # Broadcast to admin WebSocket
+        try:
+            await cost_tracker.record_usage(
+                session_id=session_id,
+                task_id=task_id,
+                user_id=user_id,
+                total_cost_usd=cost_data.get("total_cost_usd", 0.0),
+                input_tokens=cost_data.get("input_tokens", 0),
+                output_tokens=cost_data.get("output_tokens", 0),
+                cache_read_tokens=cost_data.get("cache_read_tokens", 0),
+                cache_creation_tokens=cost_data.get("cache_creation_tokens", 0),
+                duration_ms=cost_data.get("duration_ms", 0),
+                num_turns=cost_data.get("num_turns", 0),
+            )
+        except Exception as e:
+            logger.error(f"Failed to broadcast cost update: {e}", exc_info=True)
 
     def _parse_message(self, message) -> list[dict]:
         """Parse a Claude SDK message into our standardised format.
